@@ -10,6 +10,16 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "PromptFlow",
   description: "Organize and manage your prompts like a pro",
+  openGraph: {
+    title: "PromptFlow",
+    description: "Organize and manage your prompts like a pro",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "PromptFlow",
+    description: "Organize and manage your prompts like a pro",
+  },
 };
 
 export default function RootLayout({
