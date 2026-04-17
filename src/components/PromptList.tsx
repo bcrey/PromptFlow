@@ -18,6 +18,8 @@ import PromptItem from "./PromptItem";
 
 interface PromptListProps {
   project: Project;
+  addToTop: boolean;
+  onSetAddToTop: (value: boolean) => void;
   onAdd: (text: string) => void;
   onEdit: (promptId: string, text: string) => void;
   onToggleDone: (promptId: string) => void;
@@ -33,6 +35,8 @@ function autoResize(el: HTMLTextAreaElement | null) {
 
 export default function PromptList({
   project,
+  addToTop,
+  onSetAddToTop,
   onAdd,
   onEdit,
   onToggleDone,
@@ -107,11 +111,23 @@ export default function PromptList({
             Add
           </button>
         </div>
-        <p className="text-[12px] text-[var(--color-text-tertiary)] mt-2 px-1">
-          {project.prompts.length === 0
-            ? "No prompts yet"
-            : `${activePrompts.length} active${donePrompts.length > 0 ? ` \u00b7 ${donePrompts.length} done` : ""}`}
-        </p>
+        <div className="flex items-center justify-between mt-2 px-1">
+          <p className="text-[12px] text-[var(--color-text-tertiary)]">
+            {project.prompts.length === 0
+              ? "No prompts yet"
+              : `${activePrompts.length} active${donePrompts.length > 0 ? ` \u00b7 ${donePrompts.length} done` : ""}`}
+          </p>
+          <button
+            className="text-[11px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors flex items-center gap-1"
+            onClick={() => onSetAddToTop(!addToTop)}
+            title={addToTop ? "New prompts added to top" : "New prompts added to bottom"}
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: addToTop ? "rotate(180deg)" : undefined }}>
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+            {addToTop ? "Add to top" : "Add to bottom"}
+          </button>
+        </div>
       </div>
 
       {/* Prompt list */}

@@ -45,9 +45,15 @@ export function usePromptStore() {
     setState((prev) => ({
       ...prev,
       projects: prev.projects.map((p) =>
-        p.id === prev.activeProjectId ? { ...p, prompts: [...p.prompts, prompt] } : p
+        p.id === prev.activeProjectId
+          ? { ...p, prompts: prev.addToTop ? [prompt, ...p.prompts] : [...p.prompts, prompt] }
+          : p
       ),
     }));
+  }
+
+  function setAddToTop(value: boolean) {
+    setState((prev) => ({ ...prev, addToTop: value }));
   }
 
   function togglePromptDone(promptId: string) {
@@ -141,6 +147,7 @@ export function usePromptStore() {
     renameProject,
     setActiveProject,
     addPrompt,
+    setAddToTop,
     editPrompt,
     togglePromptDone,
     reorderPrompts,

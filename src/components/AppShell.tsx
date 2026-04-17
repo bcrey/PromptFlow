@@ -13,6 +13,7 @@ export default function AppShell() {
     renameProject,
     setActiveProject,
     addPrompt,
+    setAddToTop,
     editPrompt,
     togglePromptDone,
     reorderPrompts,
@@ -220,6 +221,8 @@ export default function AppShell() {
         {activeProject ? (
           <PromptList
             project={activeProject}
+            addToTop={state.addToTop ?? false}
+            onSetAddToTop={setAddToTop}
             onAdd={addPrompt}
             onEdit={editPrompt}
             onToggleDone={togglePromptDone}

@@ -14,4 +14,5 @@ export interface Project {
 export interface AppState {
   projects: Project[];
   activeProjectId: string | null;
+  addToTop?: boolean;
 }
