@@ -1,110 +1,424 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocalStorage } from "./use-local-storage";
-import type { AppState, Project, Prompt } from "@/types/prompt";
+import { useAuth } from "@/components/AuthProvider";
+import { createClient } from "@/lib/supabase";
+import type { Project, Prompt, AppState } from "@/types/prompt";
+import type { DbProjectWithPrompts } from "@/types/database";
 
-const DEFAULT_STATE: AppState = {
-  projects: [],
-  activeProjectId: null,
-};
+interface LocalPrefs {
+  activeProjectId: string | null;
+  addToTop: boolean;
+}
 
-function newId(): string {
-  return crypto.randomUUID();
+function mapDbToProject(dbProject: DbProjectWithPrompts): Project {
+  return {
+    id: dbProject.id,
+    name: dbProject.name,
+    prompts: (dbProject.prompts ?? [])
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .map((p) => ({
+        id: p.id,
+        text: p.text,
+        done: p.done,
+        createdAt: new Date(p.created_at).getTime(),
+      })),
+  };
+}
+
+function readLocalProjects(): Project[] {
+  try {
+    const raw = localStorage.getItem("prompt-manager");
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return parsed.projects ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalProjects(projects: Project[]) {
+  try {
+    localStorage.setItem(
+      "prompt-manager",
+      JSON.stringify({ projects })
+    );
+  } catch {
+    // storage full or unavailable
+  }
 }
 
 export function usePromptStore() {
-  const [state, setState] = useLocalStorage<AppState>("prompt-manager", DEFAULT_STATE);
+  const { user, loading: authLoading } = useAuth();
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [prefs, setPrefs] = useLocalStorage<LocalPrefs>("prompt-manager-prefs", {
+    activeProjectId: null,
+    addToTop: false,
+  });
 
-  const activeProject = state.projects.find((p) => p.id === state.activeProjectId) ?? null;
+  const supabase = createClient();
+  const prevUserIdRef = useRef<string | null | undefined>(undefined);
 
-  function addProject(name: string) {
-    const project: Project = { id: newId(), name, prompts: [] };
-    setState((prev) => ({
-      ...prev,
-      projects: [...prev.projects, project],
-      activeProjectId: project.id,
-    }));
+  const activeProject =
+    projects.find((p) => p.id === prefs.activeProjectId) ?? null;
+
+  // --- Load data when auth state resolves or changes ---
+
+  const loadCloud = useCallback(async () => {
+    if (!user) return;
+    setLoading(true);
+
+    // Check if user has cloud data
+    const { count } = await supabase
+      .from("projects")
+      .select("id", { count: "exact", head: true });
+
+    // Migrate localStorage data on first login
+    if (count === 0) {
+      const localProjects = readLocalProjects();
+      if (localProjects.length > 0) {
+        for (const project of localProjects) {
+          const { data: newProject } = await supabase
+            .from("projects")
+            .insert({ name: project.name, user_id: user.id })
+            .select()
+            .single();
+
+          if (!newProject) continue;
+
+          if (project.prompts.length > 0) {
+            await supabase.from("prompts").insert(
+              project.prompts.map((p, i) => ({
+                project_id: newProject.id,
+                user_id: user.id,
+                text: p.text,
+                done: p.done,
+                sort_order: i,
+              }))
+            );
+          }
+        }
+      }
+    }
+
+    // Load all projects with prompts
+    const { data, error } = await supabase
+      .from("projects")
+      .select("*, prompts(*)")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Failed to load projects:", error);
+    } else if (data) {
+      setProjects((data as DbProjectWithPrompts[]).map(mapDbToProject));
+    }
+    setLoading(false);
+  }, [user]);
+
+  useEffect(() => {
+    if (authLoading) return;
+
+    const currentUserId = user?.id ?? null;
+    if (currentUserId === prevUserIdRef.current) return;
+    prevUserIdRef.current = currentUserId;
+
+    if (user) {
+      loadCloud();
+    } else {
+      // Migrate prefs from old format on first load
+      const existingPrefs = localStorage.getItem("prompt-manager-prefs");
+      if (!existingPrefs) {
+        try {
+          const raw = localStorage.getItem("prompt-manager");
+          if (raw) {
+            const old = JSON.parse(raw) as AppState;
+            if (old.activeProjectId || old.addToTop) {
+              setPrefs({
+                activeProjectId: old.activeProjectId ?? null,
+                addToTop: old.addToTop ?? false,
+              });
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      setProjects(readLocalProjects());
+      setLoading(false);
+    }
+  }, [user?.id, authLoading, loadCloud, setPrefs]);
+
+  // --- Mutations ---
+
+  async function addProject(name: string) {
+    if (user) {
+      const { data, error } = await supabase
+        .from("projects")
+        .insert({ name, user_id: user.id })
+        .select()
+        .single();
+      if (error || !data) {
+        console.error("Failed to create project:", error);
+        return;
+      }
+      const project: Project = { id: data.id, name: data.name, prompts: [] };
+      setProjects((prev) => [...prev, project]);
+      setPrefs((prev) => ({ ...prev, activeProjectId: data.id }));
+    } else {
+      const project: Project = { id: crypto.randomUUID(), name, prompts: [] };
+      setProjects((prev) => {
+        const updated = [...prev, project];
+        writeLocalProjects(updated);
+        return updated;
+      });
+      setPrefs((prev) => ({ ...prev, activeProjectId: project.id }));
+    }
   }
 
-  function removeProject(id: string) {
-    setState((prev) => {
-      const projects = prev.projects.filter((p) => p.id !== id);
-      return {
-        ...prev,
-        projects,
-        activeProjectId:
-          prev.activeProjectId === id ? (projects[0]?.id ?? null) : prev.activeProjectId,
-      };
+  async function removeProject(id: string) {
+    if (user) {
+      const { error } = await supabase.from("projects").delete().eq("id", id);
+      if (error) {
+        console.error("Failed to delete project:", error);
+        return;
+      }
+    }
+
+    setProjects((prev) => {
+      const updated = prev.filter((p) => p.id !== id);
+      if (!user) writeLocalProjects(updated);
+      if (prefs.activeProjectId === id) {
+        setPrefs((prev) => ({
+          ...prev,
+          activeProjectId: updated[0]?.id ?? null,
+        }));
+      }
+      return updated;
+    });
+  }
+
+  async function renameProject(id: string, name: string) {
+    if (user) {
+      const { error } = await supabase
+        .from("projects")
+        .update({ name })
+        .eq("id", id);
+      if (error) {
+        console.error("Failed to rename project:", error);
+        return;
+      }
+    }
+
+    setProjects((prev) => {
+      const updated = prev.map((p) => (p.id === id ? { ...p, name } : p));
+      if (!user) writeLocalProjects(updated);
+      return updated;
     });
   }
 
   function setActiveProject(id: string) {
-    setState((prev) => ({ ...prev, activeProjectId: id }));
+    setPrefs((prev) => ({ ...prev, activeProjectId: id }));
   }
 
-  function addPrompt(text: string) {
-    const prompt: Prompt = { id: newId(), text, done: false, createdAt: Date.now() };
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) =>
-        p.id === prev.activeProjectId
-          ? { ...p, prompts: prev.addToTop ? [prompt, ...p.prompts] : [...p.prompts, prompt] }
-          : p
-      ),
-    }));
+  async function addPrompt(text: string) {
+    const projectId = prefs.activeProjectId;
+    if (!projectId) return;
+
+    const project = projects.find((p) => p.id === projectId);
+    if (!project) return;
+
+    if (user) {
+      const sortOrder = prefs.addToTop
+        ? (project.prompts[0]?.createdAt ?? Date.now()) - 1
+        : Date.now();
+
+      const { data, error } = await supabase
+        .from("prompts")
+        .insert({
+          project_id: projectId,
+          user_id: user.id,
+          text,
+          done: false,
+          sort_order: sortOrder,
+        })
+        .select()
+        .single();
+
+      if (error || !data) {
+        console.error("Failed to add prompt:", error);
+        return;
+      }
+
+      const prompt: Prompt = {
+        id: data.id,
+        text: data.text,
+        done: data.done,
+        createdAt: new Date(data.created_at).getTime(),
+      };
+
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                prompts: prefs.addToTop
+                  ? [prompt, ...p.prompts]
+                  : [...p.prompts, prompt],
+              }
+            : p
+        )
+      );
+    } else {
+      const prompt: Prompt = {
+        id: crypto.randomUUID(),
+        text,
+        done: false,
+        createdAt: Date.now(),
+      };
+
+      setProjects((prev) => {
+        const updated = prev.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                prompts: prefs.addToTop
+                  ? [prompt, ...p.prompts]
+                  : [...p.prompts, prompt],
+              }
+            : p
+        );
+        writeLocalProjects(updated);
+        return updated;
+      });
+    }
   }
 
   function setAddToTop(value: boolean) {
-    setState((prev) => ({ ...prev, addToTop: value }));
+    setPrefs((prev) => ({ ...prev, addToTop: value }));
   }
 
-  function togglePromptDone(promptId: string) {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) =>
-        p.id === prev.activeProjectId
-          ? { ...p, prompts: p.prompts.map((pr) => (pr.id === promptId ? { ...pr, done: !pr.done } : pr)) }
+  async function togglePromptDone(promptId: string) {
+    const project = projects.find((p) => p.id === prefs.activeProjectId);
+    const prompt = project?.prompts.find((pr) => pr.id === promptId);
+    if (!prompt) return;
+
+    const newDone = !prompt.done;
+
+    if (user) {
+      const { error } = await supabase
+        .from("prompts")
+        .update({ done: newDone })
+        .eq("id", promptId);
+      if (error) {
+        console.error("Failed to toggle prompt:", error);
+        return;
+      }
+    }
+
+    setProjects((prev) => {
+      const updated = prev.map((p) =>
+        p.id === prefs.activeProjectId
+          ? {
+              ...p,
+              prompts: p.prompts.map((pr) =>
+                pr.id === promptId ? { ...pr, done: newDone } : pr
+              ),
+            }
           : p
-      ),
-    }));
+      );
+      if (!user) writeLocalProjects(updated);
+      return updated;
+    });
   }
 
-  function reorderPrompts(activeId: string, overId: string) {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) => {
-        if (p.id !== prev.activeProjectId) return p;
-        const prompts = [...p.prompts];
-        const oldIndex = prompts.findIndex((pr) => pr.id === activeId);
-        const newIndex = prompts.findIndex((pr) => pr.id === overId);
-        if (oldIndex === -1 || newIndex === -1) return p;
-        const [moved] = prompts.splice(oldIndex, 1);
-        prompts.splice(newIndex, 0, moved);
-        return { ...p, prompts };
-      }),
-    }));
+  async function reorderPrompts(activeId: string, overId: string) {
+    const project = projects.find((p) => p.id === prefs.activeProjectId);
+    if (!project) return;
+
+    const prompts = [...project.prompts];
+    const oldIndex = prompts.findIndex((pr) => pr.id === activeId);
+    const newIndex = prompts.findIndex((pr) => pr.id === overId);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const [moved] = prompts.splice(oldIndex, 1);
+    prompts.splice(newIndex, 0, moved);
+
+    setProjects((prev) => {
+      const updated = prev.map((p) =>
+        p.id === prefs.activeProjectId ? { ...p, prompts } : p
+      );
+      if (!user) writeLocalProjects(updated);
+      return updated;
+    });
+
+    if (user) {
+      for (let i = 0; i < prompts.length; i++) {
+        await supabase
+          .from("prompts")
+          .update({ sort_order: i })
+          .eq("id", prompts[i].id);
+      }
+    }
   }
 
-  function editPrompt(promptId: string, text: string) {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) =>
-        p.id === prev.activeProjectId
-          ? { ...p, prompts: p.prompts.map((pr) => (pr.id === promptId ? { ...pr, text } : pr)) }
+  async function editPrompt(promptId: string, text: string) {
+    if (user) {
+      const { error } = await supabase
+        .from("prompts")
+        .update({ text })
+        .eq("id", promptId);
+      if (error) {
+        console.error("Failed to edit prompt:", error);
+        return;
+      }
+    }
+
+    setProjects((prev) => {
+      const updated = prev.map((p) =>
+        p.id === prefs.activeProjectId
+          ? {
+              ...p,
+              prompts: p.prompts.map((pr) =>
+                pr.id === promptId ? { ...pr, text } : pr
+              ),
+            }
           : p
-      ),
-    }));
+      );
+      if (!user) writeLocalProjects(updated);
+      return updated;
+    });
   }
 
-  function clearDone() {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) =>
-        p.id === prev.activeProjectId ? { ...p, prompts: p.prompts.filter((pr) => !pr.done) } : p
-      ),
-    }));
+  async function clearDone() {
+    const project = projects.find((p) => p.id === prefs.activeProjectId);
+    if (!project) return;
+
+    const doneIds = project.prompts.filter((pr) => pr.done).map((pr) => pr.id);
+    if (doneIds.length === 0) return;
+
+    if (user) {
+      const { error } = await supabase
+        .from("prompts")
+        .delete()
+        .in("id", doneIds);
+      if (error) {
+        console.error("Failed to clear done prompts:", error);
+        return;
+      }
+    }
+
+    setProjects((prev) => {
+      const updated = prev.map((p) =>
+        p.id === prefs.activeProjectId
+          ? { ...p, prompts: p.prompts.filter((pr) => !pr.done) }
+          : p
+      );
+      if (!user) writeLocalProjects(updated);
+      return updated;
+    });
   }
 
   function exportState() {
-    const json = JSON.stringify(state, null, 2);
+    const json = JSON.stringify({ projects }, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -114,33 +428,64 @@ export function usePromptStore() {
     URL.revokeObjectURL(url);
   }
 
-  function importState(file: File) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const parsed = JSON.parse(e.target?.result as string);
-        if (!parsed.projects || !Array.isArray(parsed.projects)) {
-          alert("Invalid file format: missing projects array.");
-          return;
-        }
-        if (!window.confirm("This will overwrite all existing data. Continue?")) return;
-        setState(parsed as AppState);
-      } catch {
-        alert("Failed to parse JSON file.");
-      }
-    };
-    reader.readAsText(file);
-  }
+  async function importState(file: File) {
+    const text = await file.text();
+    let parsed: { projects: Project[] };
 
-  function renameProject(id: string, name: string) {
-    setState((prev) => ({
-      ...prev,
-      projects: prev.projects.map((p) => (p.id === id ? { ...p, name } : p)),
-    }));
+    try {
+      parsed = JSON.parse(text);
+      if (!parsed.projects || !Array.isArray(parsed.projects)) {
+        alert("Invalid file format: missing projects array.");
+        return;
+      }
+    } catch {
+      alert("Failed to parse JSON file.");
+      return;
+    }
+
+    if (!window.confirm("This will overwrite all existing data. Continue?"))
+      return;
+
+    if (user) {
+      // Clear cloud data and re-import
+      await supabase.from("projects").delete().eq("user_id", user.id);
+
+      for (const project of parsed.projects) {
+        const { data: newProject } = await supabase
+          .from("projects")
+          .insert({ name: project.name, user_id: user.id })
+          .select()
+          .single();
+
+        if (!newProject) continue;
+
+        if (project.prompts.length > 0) {
+          await supabase.from("prompts").insert(
+            project.prompts.map((p, i) => ({
+              project_id: newProject.id,
+              user_id: user.id,
+              text: p.text,
+              done: p.done,
+              sort_order: i,
+            }))
+          );
+        }
+      }
+
+      await loadCloud();
+    } else {
+      setProjects(parsed.projects);
+      writeLocalProjects(parsed.projects);
+    }
   }
 
   return {
-    state,
+    state: {
+      projects,
+      activeProjectId: prefs.activeProjectId,
+      addToTop: prefs.addToTop,
+    },
+    loading,
     activeProject,
     addProject,
     removeProject,

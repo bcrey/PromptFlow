@@ -2,11 +2,14 @@
 
 import { useState, useRef } from "react";
 import { usePromptStore } from "@/hooks/use-prompt-store";
+import { useAuth } from "@/components/AuthProvider";
 import PromptList from "./PromptList";
 
 export default function AppShell() {
+  const { user, signOut } = useAuth();
   const {
     state,
+    loading,
     activeProject,
     addProject,
     removeProject,
@@ -49,6 +52,14 @@ export default function AppShell() {
     if (editingId && editName.trim()) renameProject(editingId, editName.trim());
     setEditingId(null);
   };
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[var(--color-bg)]">
+        <div className="text-[var(--color-text-tertiary)] text-[14px]">Loading...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-[var(--color-bg)]">
@@ -213,6 +224,27 @@ export default function AppShell() {
               }}
             />
           </div>
+          <div className="my-1.5 border-t border-[var(--color-border-subtle)]" />
+          {user ? (
+            <div className="mt-1.5 flex items-center gap-1.5 px-2">
+              <span className="flex-1 text-[11px] text-[var(--color-text-tertiary)] truncate">
+                {user.email}
+              </span>
+              <button
+                className="text-[11px] text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)] transition-colors shrink-0"
+                onClick={signOut}
+              >
+                Sign out
+              </button>
+            </div>
+          ) : (
+            <a
+              href="/auth"
+              className="mt-1.5 flex items-center justify-center gap-1.5 px-2 py-[6px] text-[11px] text-[var(--color-accent-text)] hover:bg-[var(--color-accent-light)] rounded-lg transition-colors"
+            >
+              Sign in to save your work
+            </a>
+          )}
         </div>
       </aside>
 
