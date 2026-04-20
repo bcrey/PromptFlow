@@ -228,9 +228,10 @@ export function usePromptStore() {
     if (!project) return;
 
     if (user) {
+      const existingPrompts = project.prompts;
       const sortOrder = prefs.addToTop
-        ? (project.prompts[0]?.createdAt ?? Date.now()) - 1
-        : Date.now();
+        ? (existingPrompts.length > 0 ? -1 : 0)
+        : existingPrompts.length;
 
       const { data, error } = await supabase
         .from("prompts")
